@@ -53,10 +53,17 @@
 
 ## 📦 运行与安装
 
+### 直接下载 exe（免环境）
+
+[**v1.1.8 Windows 64 位**](https://github.com/2458090042-gif/ameath-desktop-pet/releases/download/v1.1.8/ameath-v1.1.8-win64.exe) · 42 MB · 双击即可运行
+
+首次运行若被 SmartScreen 拦截，点「更多信息 → 仍要运行」（未做代码签名）。
+托盘图标若没出现，检查任务栏右下角的折叠区域。
+
 ### 从源码运行（推荐，方便改造）
 
 ```powershell
-git clone https://github.com/<你的用户名>/ameath-desktop-pet.git
+git clone https://github.com/2458090042-gif/ameath-desktop-pet.git
 cd ameath-desktop-pet
 
 # 任选其一：uv（推荐，仓库带 uv.lock）
