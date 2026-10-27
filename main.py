@@ -1,8 +1,6 @@
 import ctypes
-import sys
 import threading
 import tkinter as tk
-import webbrowser
 
 # 启用 Windows DPI 感知（解决高DPI屏幕模糊问题）
 try:
@@ -17,8 +15,7 @@ except Exception:
 def main():
     from ameath.config import load_config
     from ameath.pet import DesktopGif
-    from ameath.utils import check_new_version, get_version, version_greater_than
-    from ameath.settings import SettingsWindow
+    from ameath.utils import get_version
 
     VERSION = get_version()
 
@@ -45,6 +42,7 @@ def main():
             self.display_priority = config.get("display_priority", 1)
             self.voice_enabled = config.get("voice_enabled", True)
             self.voice_volume = config.get("voice_volume", 100)
+            self._pet_active = True  # 键盘快捷键激活状态（右键桌宠激活，左键别处取消）
             self._create_instances(count)
 
         def _create_instances(self, count):
@@ -180,23 +178,110 @@ def main():
         if app.pets:
             app.pets[0].app = icon
 
-        def check_version_and_notify(root):
-            """检查版本并通知（后台线程调用）"""
-            latest = check_new_version()
-            if latest and version_greater_than(latest, VERSION):
-                config = load_config()
-                if config.get("skip_updates"):
-                    return
-                if config.get("skip_version") == latest:
-                    return
-                # 在主线程打开设置窗口并切换到更新标签页
-                root.after(
-                    0, lambda: SettingsWindow(root, app, VERSION).show_with_update_tab()
-                )
+        # 音乐控制快捷键（GetAsyncKeyState 轮询，无边框窗口也能响应）
+        # 提前初始化音乐播放器，让键盘快捷键随时可用
+        try:
+            from ameath.music_player import MusicPlayer
+            # 完整初始化音乐播放器核心（不建GUI），确保双键/快捷键随时可播放
+            mp = MusicPlayer(parent=root, create_gui=False)
+            if not hasattr(mp, 'music_volume'):
+                mp.music_volume = config.get("music_volume", 100)
+        except:
+            pass
 
-        # 后台检查版本（非阻塞）
+        # 音乐控制操作函数（供轮询调用）
+        def _music_prev():
+            try:
+                from ameath.music_player import MusicPlayer
+                if MusicPlayer._instance and MusicPlayer._instance.music_files:
+                    MusicPlayer._instance.previous_track()
+            except:
+                pass
+
+        def _music_next():
+            try:
+                from ameath.music_player import MusicPlayer
+                if MusicPlayer._instance and MusicPlayer._instance.music_files:
+                    MusicPlayer._instance.next_track()
+            except:
+                pass
+
+        def _music_toggle():
+            """暂停/播放切换（单击空格）"""
+            try:
+                from ameath.music_player import MusicPlayer
+                if MusicPlayer._instance and MusicPlayer._instance.music_files:
+                    MusicPlayer._instance.toggle_play_pause()
+            except:
+                pass
+
+        def _vol_up():
+            ctypes.windll.user32.keybd_event(0xAF, 0, 0, 0)      # VK_VOLUME_UP 按下
+            ctypes.windll.user32.keybd_event(0xAF, 0, 2, 0)      # VK_VOLUME_UP 释放
+
+        def _vol_down():
+            ctypes.windll.user32.keybd_event(0xAE, 0, 0, 0)      # VK_VOLUME_DOWN 按下
+            ctypes.windll.user32.keybd_event(0xAE, 0, 2, 0)      # VK_VOLUME_DOWN 释放
+
+        # 音乐控制快捷键（右键桌宠激活，左键点别处取消）
+        _key_state = {0x25: False, 0x26: False, 0x27: False, 0x28: False}
+        _lbtn_was_down = False
+
+        def _is_mouse_over_pet():
+            """检测鼠标是否悬停在任意桌宠窗口上"""
+            try:
+                mx = root.winfo_pointerx()
+                my = root.winfo_pointery()
+                for pet in app.pets:
+                    if pet.x <= mx <= pet.x + pet.w and pet.y <= my <= pet.y + pet.h:
+                        return True
+                return False
+            except:
+                return False
+
+        def _poll_music_keys():
+            nonlocal _lbtn_was_down
+            import time as _time
+
+            # 检测左键点击：点在桌宠以外 → 取消激活
+            lbtn_down = ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000
+            if lbtn_down and not _lbtn_was_down:
+                if not _is_mouse_over_pet():
+                    app._pet_active = False
+            _lbtn_was_down = lbtn_down
+
+            # 未激活时跳过快捷键处理
+            if not app._pet_active:
+                for vk in _key_state:
+                    _key_state[vk] = False
+                root.after(150, _poll_music_keys)
+                return
+
+            try:
+                # 方向键 — 按下瞬间触发一次
+                for vk, action in [
+                    (0x25, _music_prev),   # Left
+                    (0x27, _music_next),   # Right
+                    (0x26, _vol_up),       # Up → 系统音量+
+                    (0x28, _vol_down),     # Down → 系统音量-
+                ]:
+                    down = ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000
+                    if down and not _key_state[vk]:
+                        action()
+                    _key_state[vk] = down
+
+                # Space (0x20) — 按下即切换暂停/播放
+                if ctypes.windll.user32.GetAsyncKeyState(0x20) & 0x0001:
+                    _music_toggle()
+            except:
+                pass
+            root.after(30, _poll_music_keys)
+
+        root.after(500, _poll_music_keys)
+
+        # 后台检查版本（非阻塞）- 仅打印日志，不弹窗
         threading.Thread(
-            target=check_version_and_notify, args=(root,), daemon=True
+            target=lambda: _check_version_print(VERSION), daemon=True
         ).start()
 
         # 延迟启动托盘，让窗口完全初始化后再显示
@@ -215,29 +300,23 @@ def main():
         instance_count = config.get("instance_count", 1)
         app = PetManager(root, instance_count)
 
-        def check_version_and_notify(root):
-            """检查版本并通知（后台线程调用）"""
-            latest = check_new_version()
-            if latest and version_greater_than(latest, VERSION):
-                config = load_config()
-                if config.get("skip_updates"):
-                    return
-                if config.get("skip_version") == latest:
-                    return
-                # 在主线程打开设置窗口并切换到更新标签页
-                root.after(
-                    0, lambda: SettingsWindow(root, app, VERSION).show_with_update_tab()
-                )
-
-        # 后台检查版本（非阻塞）
+        # 后台检查版本（非阻塞）- 仅打印日志，不弹窗
         threading.Thread(
-            target=check_version_and_notify, args=(root,), daemon=True
+            target=lambda: _check_version_print(VERSION), daemon=True
         ).start()
 
         root.deiconify()  # 显示窗口
         root.mainloop()
 
         # 结束
+
+
+def _check_version_print(version):
+    """检查版本更新并打印结果，不弹设置窗口"""
+    from ameath.utils import check_new_version, version_greater_than
+    latest = check_new_version()
+    if latest and version_greater_than(latest, version):
+        print(f"发现新版本: {latest}，当前版本: {version}")
 
 
 if __name__ == "__main__":

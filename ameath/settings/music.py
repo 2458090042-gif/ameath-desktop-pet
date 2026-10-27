@@ -9,21 +9,25 @@ from ..config import load_config, save_config
 def create_music_tab(settings_window, parent):
     """创建音乐播放器标签页 - 歌姬偶像风格
 
-    Args:
-        settings_window: SettingsWindow 实例
-        parent: 父容器
-
-    Returns:
-        创建的标签页 frame
+    采用懒加载：打开设置窗口时不立即构建播放器UI（构建约需1秒，会卡住桌宠），
+    等用户切换到音乐标签页时才由 init_music_tab_if_needed 初始化。
     """
     frame = tk.Frame(parent, bg=settings_window.colors["bg"])
-
-    # 创建内嵌音乐播放器（使用统一风格）
-    settings_window.music_player_embedded = MusicPlayerEmbedded(
-        frame, settings_window.colors, settings_window.fonts, settings_window
-    )
-
+    frame._lazy_music = True
     return frame
+
+
+def init_music_tab_if_needed(settings_window):
+    """懒加载初始化音乐标签页UI。返回是否执行了初始化"""
+    music_frame = getattr(settings_window, "music_frame", None)
+    if music_frame is None or not getattr(music_frame, "_lazy_music", False):
+        return False
+
+    settings_window.music_player_embedded = MusicPlayerEmbedded(
+        music_frame, settings_window.colors, settings_window.fonts, settings_window
+    )
+    music_frame._lazy_music = False
+    return True
 
 
 class MusicPlayerEmbedded:
@@ -36,42 +40,42 @@ class MusicPlayerEmbedded:
         self.settings_window = settings_window
         self.config = load_config()
 
-        # 创建实际的播放器核心（使用 MusicPlayer 的音频功能）
         from ..music_player import MusicPlayer
-
-        # 创建一个隐藏的 Frame 作为 parent，确保 MusicPlayer 正常初始化
         import tkinter as tk
 
         dummy_frame = tk.Frame(parent)
         self.core_player = MusicPlayer(
-            parent=dummy_frame, position_unlock_callback=None
+            parent=dummy_frame,
+            position_unlock_callback=None,
+            create_gui=False,  # 嵌入式UI接管界面，避免重复构建播放器GUI拖慢打开速度
         )
 
-        # 同步音乐文件列表
         self.music_files = self.core_player.music_files
         self.current_index = self.core_player.current_index
         self.is_playing = self.core_player.is_playing
         self.is_paused = self.core_player.is_paused
 
-        # 从配置加载
         self.music_volume = self.config.get("music_volume", 100)
         self.music_enabled = self.config.get("music_enabled", False)
 
-        # 应用音量设置
         self.core_player.music_volume = self.music_volume
 
-        # 创建UI
+        # 确保初始随机播放状态同步到核心播放器
+        self._sync_shuffle_mode_from_config()
+
         self._create_ui()
-
-        # 加载音乐文件并更新列表显示
         self._load_music_files()
-
-        # 启动进度更新循环
         self._start_progress_loop()
+
+    def _sync_shuffle_mode_from_config(self):
+        """从配置读取随机播放状态并同步到核心播放器"""
+        from ..music_player import MusicPlayer as CoreMusicPlayer
+        shuffle = self.config.get("shuffle_mode", False)
+        self.core_player.shuffle_mode = shuffle
+        CoreMusicPlayer._shared_shuffle_mode = shuffle
 
     def _create_ui(self):
         """创建音乐播放器UI - 歌姬偶像风格"""
-        # 主容器
         main_frame = tk.Frame(self.parent, bg=self.colors["bg"])
         main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
 
@@ -87,17 +91,14 @@ class MusicPlayerEmbedded:
             bd=1,
             relief=tk.SOLID,
         )
-        playlist_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15), ipady=5)
+        playlist_frame.pack(fill=tk.X, pady=(0, 10), ipady=2)
 
-        # 列表框容器
         list_container = tk.Frame(playlist_frame, bg=self.colors["card_bg"])
-        list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        list_container.pack(fill=tk.X, pady=5)
 
-        # 滚动条
         scrollbar = tk.Scrollbar(list_container, bg=self.colors["card_bg"])
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 歌单列表 - 像素风边框，固定显示5首歌高度
         self.listbox = tk.Listbox(
             list_container,
             yscrollcommand=scrollbar.set,
@@ -110,18 +111,15 @@ class MusicPlayerEmbedded:
             relief=tk.SUNKEN,
             highlightthickness=0,
             activestyle="none",
-            height=8,
+            height=10,
             width=45,
         )
         self.listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
         scrollbar.config(command=self.listbox.yview)
+        self.listbox.bind("<ButtonRelease-1>", self._on_single_click)
 
-        self.listbox.bind("<Double-Button-1>", self._on_double_click)
-
-        # 获取用户音乐文件夹路径（首次运行复制自带歌曲）
         self.music_folder = self._get_user_music_folder()
 
-        # 可点击的文件夹路径标签
         folder_label = tk.Label(
             playlist_frame,
             text=f"📁 打开歌曲文件夹: {self.music_folder}",
@@ -130,10 +128,9 @@ class MusicPlayerEmbedded:
             fg=self.colors["accent"],
             cursor="hand2",
         )
-        folder_label.pack(pady=(5, 0))
+        folder_label.pack(pady=(3, 0))
         folder_label.bind("<Button-1>", lambda e: self._open_music_folder())
 
-        # 刷新按钮
         refresh_btn = tk.Label(
             playlist_frame,
             text="🔄 点击刷新歌曲列表",
@@ -142,7 +139,7 @@ class MusicPlayerEmbedded:
             fg=self.colors["subtext"],
             cursor="hand2",
         )
-        refresh_btn.pack(pady=(3, 0))
+        refresh_btn.pack(pady=(2, 0))
         refresh_btn.bind("<Button-1>", lambda e: self._refresh_list())
 
         # ===== 演出控制台 =====
@@ -157,14 +154,11 @@ class MusicPlayerEmbedded:
             bd=1,
             relief=tk.SOLID,
         )
-        console_frame.pack(fill=tk.X, pady=(0, 15), ipady=5)
+        console_frame.pack(fill=tk.X, pady=(0, 10), ipady=5)
 
-        # 播放控制按钮 - 偶像风格
         btn_row = tk.Frame(console_frame, bg=self.colors["card_bg"])
-        btn_row.pack(fill=tk.X, pady=(0, 10))
+        btn_row.pack(fill=tk.X, pady=(0, 8))
 
-        # 统一按钮样式
-        # 统一按钮样式 - 演出控制台
         base_btn = {
             "bg": self.colors["accent"],
             "fg": "white",
@@ -185,7 +179,7 @@ class MusicPlayerEmbedded:
             **base_btn,
             state=tk.NORMAL if self.music_enabled else tk.DISABLED,
         )
-        self.prev_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.prev_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.play_btn = tk.Button(
             btn_row,
@@ -195,7 +189,7 @@ class MusicPlayerEmbedded:
             **base_btn,
             state=tk.NORMAL if self.music_enabled else tk.DISABLED,
         )
-        self.play_btn.pack(side=tk.LEFT, padx=5)
+        self.play_btn.pack(side=tk.LEFT, padx=4)
 
         self.next_btn = tk.Button(
             btn_row,
@@ -205,15 +199,28 @@ class MusicPlayerEmbedded:
             **base_btn,
             state=tk.NORMAL if self.music_enabled else tk.DISABLED,
         )
-        self.next_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self.next_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        # 进度条 - 演出进度
+        # 播放模式切换（顺序/随机）
+        self.shuffle_mode = self.config.get("shuffle_mode", False)
+        mode_text = "📋 顺序" if not self.shuffle_mode else "🔀 随机"
+        self.mode_btn = tk.Button(
+            btn_row,
+            text=mode_text,
+            width=9,
+            command=self._toggle_mode,
+            **{**base_btn, "bg": "#B388FF"},
+            state=tk.NORMAL if self.music_enabled else tk.DISABLED,
+        )
+        self.mode_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # 进度条
         progress_row = tk.Frame(console_frame, bg=self.colors["card_bg"])
-        progress_row.pack(fill=tk.X, pady=(10, 5))
+        progress_row.pack(fill=tk.X, pady=(8, 5))
 
         tk.Label(
             progress_row,
-            text="演出进度: ",
+            text="演出进度:",
             font=self.fonts["control"],
             bg=self.colors["card_bg"],
             fg=self.colors["text"],
@@ -226,18 +233,21 @@ class MusicPlayerEmbedded:
             to=100,
             orient=tk.HORIZONTAL,
             variable=self.progress_var,
-            command=self._on_progress_change,
-            length=300,
+            length=280,
             font=self.fonts["small"],
             bg=self.colors["card_bg"],
             fg=self.colors["text"],
             highlightthickness=0,
-            troughcolor=self.colors["tab_bg"],
+            troughcolor="#E0C8D4",
             activebackground=self.colors["accent"],
-            sliderrelief=tk.FLAT,
+            sliderrelief=tk.RAISED,
+            width=14,
             state=tk.NORMAL if self.music_enabled else tk.DISABLED,
         )
-        self.progress_bar.pack(side=tk.LEFT, padx=(5, 10))
+        self._seeking = False
+        self.progress_bar.pack(side=tk.LEFT, padx=(5, 8), fill=tk.X, expand=True)
+        self.progress_bar.bind("<ButtonPress-1>", self._on_seek_start)
+        self.progress_bar.bind("<ButtonRelease-1>", self._on_seek)
 
         self.time_label = tk.Label(
             progress_row,
@@ -249,7 +259,7 @@ class MusicPlayerEmbedded:
         )
         self.time_label.pack(side=tk.LEFT)
 
-        # ===== 音量与资源管理 =====
+        # ===== 音效设定 =====
         settings_frame = tk.LabelFrame(
             main_frame,
             text="🔧 音效设定",
@@ -263,7 +273,6 @@ class MusicPlayerEmbedded:
         )
         settings_frame.pack(fill=tk.X, pady=(0, 10), ipady=5)
 
-        # 音量控制
         volume_row = tk.Frame(settings_frame, bg=self.colors["card_bg"])
         volume_row.pack(fill=tk.X, pady=(0, 10))
 
@@ -305,26 +314,28 @@ class MusicPlayerEmbedded:
         )
         self.volume_label.pack(side=tk.LEFT)
 
-        # 保存按钮引用（空列表，因为已删除按钮）
         self.action_buttons = []
 
     def _get_user_music_folder(self):
-        """获取用户音乐文件夹路径，首次运行复制自带歌曲"""
+        """获取用户音乐文件夹路径"""
         import os
         import shutil
         from ..utils import resource_path
 
-        music_folder = os.path.join(os.path.expanduser("~"), "ameath_songs")
+        music_folder = os.path.normpath(
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "sound",
+                "music",
+            )
+        )
 
-        # 如果文件夹不存在，创建它
         if not os.path.exists(music_folder):
             os.makedirs(music_folder, exist_ok=True)
-
-            # 首次运行，复制自带歌曲（使用 resource_path 获取打包后的路径）
             bundled_music = resource_path("sound/music")
             if os.path.exists(bundled_music):
                 for file in os.listdir(bundled_music):
-                    if file.lower().endswith((".wav", ".mp3")):
+                    if file.lower().endswith((".wav", ".mp3", ".flac")):
                         src = os.path.join(bundled_music, file)
                         dst = os.path.join(music_folder, file)
                         shutil.copy2(src, dst)
@@ -335,7 +346,6 @@ class MusicPlayerEmbedded:
         """打开音乐文件夹"""
         import os
         import subprocess
-
         try:
             subprocess.Popen(f'explorer "{self.music_folder}"', shell=True)
         except Exception as e:
@@ -344,26 +354,21 @@ class MusicPlayerEmbedded:
     def _load_music_files(self):
         """加载音乐文件列表"""
         import os
-
-        # 使用用户音乐文件夹
         music_dir = self.music_folder
         self.music_files = []
 
         if os.path.exists(music_dir):
             for file in sorted(os.listdir(music_dir)):
-                if file.lower().endswith((".wav", ".mp3")):
+                if file.lower().endswith((".wav", ".mp3", ".flac")):
                     self.music_files.append(os.path.join(music_dir, file))
 
-        # 同步到核心播放器
         self.core_player.music_files = self.music_files
         self.core_player.load_music_files_internal()
-
         self._update_listbox()
 
     def _update_listbox(self):
         """更新列表框显示"""
         import os
-
         self.listbox.delete(0, tk.END)
         for file in self.music_files:
             self.listbox.insert(tk.END, f" ♪ {os.path.basename(file)}")
@@ -372,12 +377,18 @@ class MusicPlayerEmbedded:
             self.listbox.selection_set(self.current_index)
             self.listbox.see(self.current_index)
 
-    def _on_progress_change(self, value):
-        """进度条拖动"""
+    def _on_seek_start(self, event):
+        """开始拖动进度条，暂停UI更新防止覆盖"""
+        self._seeking = True
+
+    def _on_seek(self, event):
+        """鼠标松开进度条时跳转到指定位置"""
+        self._seeking = False
         if not self.music_files or self.current_index < 0:
             return
-
-        # 调用核心播放器的进度跳转
+        if not self.is_playing and not self.is_paused:
+            return
+        value = self.progress_var.get()
         self.core_player.on_progress_change(value)
 
     def _on_volume_change(self, value):
@@ -385,22 +396,18 @@ class MusicPlayerEmbedded:
         volume = int(float(value))
         self.music_volume = volume
         self.volume_label.config(text=f"{volume}%")
-
-        # 同步到核心播放器，实时调整音量
         self.core_player.music_volume = volume
-        # 调用apply_current_volume同步到共享变量，确保音频回调读取最新值
         self.core_player.apply_current_volume()
 
         config = load_config()
         config["music_volume"] = volume
         save_config(config)
-        
-        # 同步到个性化界面的滑块
+
         if self.settings_window and hasattr(self.settings_window, 'music_volume_var'):
             self.settings_window.music_volume_var.set(volume)
 
-    def _on_double_click(self, event):
-        """双击播放"""
+    def _on_single_click(self, event):
+        """单击播放"""
         if not self.music_enabled:
             return
         selection = self.listbox.curselection()
@@ -414,6 +421,12 @@ class MusicPlayerEmbedded:
             return
         if self.is_playing:
             self._pause()
+        elif self.is_paused:
+            # 从暂停位置继续
+            self.core_player.toggle_play_pause()
+            self.is_playing = self.core_player.is_playing
+            self.is_paused = self.core_player.is_paused
+            self.play_btn.config(text="⏸ 暂停演出")
         else:
             self._play_current()
 
@@ -421,30 +434,22 @@ class MusicPlayerEmbedded:
         """播放当前选中的歌曲"""
         if not self.music_files:
             return
-        
-        # 如果没有选中歌曲，随机选择一首
+
         if self.current_index < 0:
             self.current_index = random.randint(0, len(self.music_files) - 1)
             self._update_listbox()
 
-        # 同步当前索引到核心播放器
         self.core_player.current_index = self.current_index
         self.core_player.music_files = self.music_files
-
-        # 调用核心播放器播放
         self.core_player.play_current_track()
 
-        # 更新UI状态
         self.is_playing = self.core_player.is_playing
         self.is_paused = self.core_player.is_paused
         self.play_btn.config(text="⏸ 暂停演出")
 
     def _pause(self):
         """暂停播放"""
-        # 调用核心播放器暂停
         self.core_player.toggle_play_pause()
-
-        # 更新UI状态
         self.is_playing = self.core_player.is_playing
         self.is_paused = self.core_player.is_paused
         self.play_btn.config(text="▶ 继续演出")
@@ -462,10 +467,33 @@ class MusicPlayerEmbedded:
         """下一首"""
         if not self.music_files:
             return
-        self.current_index = (self.current_index + 1) % len(self.music_files)
+        if self.shuffle_mode:
+            n = len(self.music_files)
+            if n > 1:
+                idx = random.randint(0, n - 2)
+                if idx >= self.current_index:
+                    idx += 1
+                self.current_index = idx
+            else:
+                self.current_index = 0
+        else:
+            self.current_index = (self.current_index + 1) % len(self.music_files)
         self._update_listbox()
         if self.is_playing:
             self._play_current()
+
+    def _toggle_mode(self):
+        """切换播放模式（顺序/随机）"""
+        self.shuffle_mode = not self.shuffle_mode
+        mode_text = "📋 顺序" if not self.shuffle_mode else "🔀 随机"
+        self.mode_btn.config(text=mode_text)
+        config = load_config()
+        config["shuffle_mode"] = self.shuffle_mode
+        save_config(config)
+        if hasattr(self.core_player, 'shuffle_mode'):
+            self.core_player.shuffle_mode = self.shuffle_mode
+            # 同步共享变量，确保键盘快捷键（← →）也使用正确的模式
+            self.core_player._sync_to_shared()
 
     def _start_progress_loop(self):
         """启动进度更新循环"""
@@ -475,42 +503,36 @@ class MusicPlayerEmbedded:
         """更新进度UI"""
         try:
             if self.core_player.is_playing and not self.core_player.is_paused:
-                # 更新播放按钮状态
                 if self.play_btn.cget("text") != "⏸ 暂停演出":
                     self.play_btn.config(text="⏸ 暂停演出")
 
-                # 更新进度条（如果有进度信息）
                 if self.core_player.total_length > 0 and self.core_player.sample_rate:
-                    # 用 sample_rate 和 current_position 计算进度
                     current_ms = int(
                         self.core_player.current_position
                         * 1000
                         / self.core_player.sample_rate
                     )
-                    progress = (
-                        (current_ms / self.core_player.total_length) * 100
-                        if self.core_player.total_length > 0
-                        else 0
-                    )
-                    self.progress_var.set(min(progress, 100))
+                    if not self._seeking:
+                        progress = (
+                            (current_ms / self.core_player.total_length) * 100
+                            if self.core_player.total_length > 0
+                            else 0
+                        )
+                        self.progress_var.set(min(progress, 100))
 
-                    # 更新时间显示
                     self.time_label.config(
                         text=f"{self._format_time(current_ms)} / {self._format_time(self.core_player.total_length)}"
                     )
             else:
-                # 更新播放按钮状态
                 if (
                     self.core_player.is_paused
                     and self.play_btn.cget("text") != "▶ 继续演出"
                 ):
                     self.play_btn.config(text="▶ 继续演出")
 
-            # 继续循环 - 检查窗口是否还存在
             if hasattr(self, "parent") and self.parent.winfo_exists():
                 self.parent.after(100, self._update_progress_ui)
         except Exception as e:
-            # 静默处理更新错误，继续循环
             if hasattr(self, "parent"):
                 try:
                     if self.parent.winfo_exists():
@@ -528,32 +550,3 @@ class MusicPlayerEmbedded:
     def _refresh_list(self):
         """刷新音乐列表"""
         self._load_music_files()
-
-    def _import_music(self):
-        """导入音乐文件"""
-        import os
-        import shutil
-        from tkinter import filedialog
-        from ..utils import resource_path
-
-        files = filedialog.askopenfilenames(
-            title="选择音乐文件",
-            filetypes=[
-                ("音频文件", "*.wav *.mp3"),
-                ("WAV文件", "*.wav"),
-                ("MP3文件", "*.mp3"),
-                ("所有文件", "*.*"),
-            ],
-        )
-
-        if files:
-            music_dir = resource_path("sound/music")
-            os.makedirs(music_dir, exist_ok=True)
-
-            for file in files:
-                try:
-                    shutil.copy(file, music_dir)
-                except Exception as e:
-                    print(f"复制文件失败 {file}: {e}")
-
-            self._load_music_files()

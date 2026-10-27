@@ -56,6 +56,9 @@ MAX_INTERVAL = 120000  # 暂停模式随机动画最大时间(ms)
 FOLLOW_START_DIST = 200  # 开始跟随的距离
 FOLLOW_STOP_DIST = 60  # 停止跟随/好奇的距离
 
+# 窗口侵入深度 — 桌宠能进入前台窗口的最大深度（取自身宽高倍数，1.0=一个身位）
+WINDOW_INTRUSION_DEPTH = 1.0
+
 # 速度倍率
 SPEED_WANDER = 0.8  # 游荡速度
 SPEED_FOLLOW = 1.2  # 跟随速度

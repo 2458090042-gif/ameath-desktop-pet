@@ -33,6 +33,15 @@ DEFAULT_CONFIG = {
     "voice_volume": DEFAULT_VOICE_VOLUME,
     "music_enabled": True,
     "music_volume": 100,
+    "shuffle_mode": False,
+    "ai_enabled": False,
+    "ai_provider": "deepseek",
+    "deepseek_api_key": "",
+    "deepseek_model": "deepseek-chat",
+    "mimo_api_key": "",
+    "mimo_model": "mimo-v2.5",
+    "zhipu_api_key": "",
+    "zhipu_model": "glm-4-flash",
 }
 
 
@@ -131,6 +140,20 @@ def _sanitize_config(config):
         min_value=0,
         max_value=100,
     )
+    result["shuffle_mode"] = _coerce_bool(
+        config.get("shuffle_mode"), DEFAULT_CONFIG["shuffle_mode"]
+    )
+    # AI 配置（字符串直接传递）
+    result["ai_enabled"] = _coerce_bool(
+        config.get("ai_enabled"), DEFAULT_CONFIG["ai_enabled"]
+    )
+    result["ai_provider"] = config.get("ai_provider", DEFAULT_CONFIG["ai_provider"])
+    result["deepseek_api_key"] = config.get("deepseek_api_key", DEFAULT_CONFIG["deepseek_api_key"])
+    result["deepseek_model"] = config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"])
+    result["mimo_api_key"] = config.get("mimo_api_key", DEFAULT_CONFIG["mimo_api_key"])
+    result["mimo_model"] = config.get("mimo_model", DEFAULT_CONFIG["mimo_model"])
+    result["zhipu_api_key"] = config.get("zhipu_api_key", DEFAULT_CONFIG["zhipu_api_key"])
+    result["zhipu_model"] = config.get("zhipu_model", DEFAULT_CONFIG["zhipu_model"])
     return result
 
 

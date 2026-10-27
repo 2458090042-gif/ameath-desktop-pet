@@ -31,6 +31,7 @@ from .personalization import create_personalization_tab
 from .update import create_update_tab
 from .about import create_about_tab
 from .music import create_music_tab, MusicPlayerEmbedded
+from .ai import create_ai_tab
 
 
 class SettingsWindow:
@@ -129,7 +130,6 @@ class SettingsWindow:
         self.window.geometry(f"{window_w}x{window_h}")
         self.window.minsize(min(900, window_w), min(900, window_h))
         self.window.resizable(True, True)
-        self.window.attributes("-topmost", True)
         # 注意：不使用 transient，否则父窗口隐藏时设置窗口也会消失
         # self.window.transient(self.parent)
         self.window.configure(bg=self.colors["bg"])
@@ -175,6 +175,10 @@ class SettingsWindow:
         self.music_frame = create_music_tab(self, self.notebook)
         self.notebook.add(self.music_frame, text="音乐")
 
+        # AI 对话设置标签页
+        self.ai_frame = create_ai_tab(self, self.notebook)
+        self.notebook.add(self.ai_frame, text="AI 对话")
+
         # 检查更新标签页
         self.update_frame = create_update_tab(self, self.notebook)
         self.notebook.add(self.update_frame, text="检查更新")
@@ -182,6 +186,9 @@ class SettingsWindow:
         # 关于标签页
         self.about_frame = create_about_tab(self, self.notebook)
         self.notebook.add(self.about_frame, text="关于")
+
+        # 懒加载音乐标签页：切换到该标签时才构建播放器UI，避免拖慢打开速度
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_music_tab_changed)
 
         # 关闭按钮区域
         btn_frame = tk.Frame(main_frame, bg=self.colors["bg"])
@@ -280,6 +287,21 @@ class SettingsWindow:
             self.window.destroy()
             self.window = None
 
+    def _on_music_tab_changed(self, event):
+        """懒加载音乐标签页：用户切换到音乐标签时才构建播放器UI"""
+        try:
+            if (
+                getattr(self, "music_frame", None)
+                and getattr(self.music_frame, "_lazy_music", False)
+                and self.notebook
+                and self.notebook.select() == str(self.music_frame)
+            ):
+                from .music import init_music_tab_if_needed
+
+                init_music_tab_if_needed(self)
+        except Exception as e:
+            print(f"初始化音乐标签页失败: {e}")
+
     def _check_and_pause_pets(self):
         """检查实例数，如果大于10则暂停所有桌宠以保证设置窗口流畅"""
         try:
@@ -305,10 +327,12 @@ class SettingsWindow:
 
 from .personalization import setup_personalization_callbacks
 from .update import setup_update_callbacks
+from .ai import setup_ai_callbacks
 
 # Setup all callbacks
 setup_personalization_callbacks(SettingsWindow)
 setup_update_callbacks(SettingsWindow)
+setup_ai_callbacks(SettingsWindow)
 
 
 # ===== Convenience function =====

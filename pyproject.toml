@@ -1,7 +1,7 @@
 [project]
 name = "ameath"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.1.8"
+description = "爱弥斯桌面宠物 - 二次开发版（AI 对话 / 音乐播放 / 天气）"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

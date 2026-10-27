@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import queue
+import random
 import wave
 import numpy as np
 import tkinter as tk
@@ -11,7 +12,22 @@ from .config import load_config, save_config
 from .utils import resource_path
 import time
 
-MUSIC_DIR = os.path.join(os.path.expanduser("~"), "ameath_songs")
+def _default_music_dir():
+    """音乐目录：优先 config.json 的 music_dir，其次仓库/打包内的 sound/music"""
+    try:
+        cfg_dir = load_config().get("music_dir")
+        if cfg_dir:
+            return cfg_dir
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        return resource_path(os.path.join("sound", "music"))
+    # 开发环境：项目根目录下的 sound/music，不依赖当前工作目录
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "sound", "music")
+
+
+MUSIC_DIR = _default_music_dir()
 
 
 class MusicPlayer:
@@ -36,13 +52,20 @@ class MusicPlayer:
     _shared_stream = None
     _shared_music_files = []
     _shared_song_name = "未选择歌曲"
+    _shared_shuffle_mode = False
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, parent=None, position_unlock_callback=None, colors=None):
+    def __init__(
+        self,
+        parent=None,
+        position_unlock_callback=None,
+        colors=None,
+        create_gui=True,
+    ):
         # 如果是重复初始化（parent为None表示只更新状态）
         if parent is None:
             return
@@ -53,7 +76,8 @@ class MusicPlayer:
             self.parent = parent
             self.position_unlock_callback = position_unlock_callback
             self._sync_from_shared()
-            self.create_gui()
+            if create_gui:
+                self.create_gui()
             return
 
         self._initialized = True
@@ -74,6 +98,7 @@ class MusicPlayer:
         self.channels = None
         self.paused_position = 0
         self.current_song_name = "未选择歌曲"
+        self.shuffle_mode = MusicPlayer._shared_shuffle_mode
 
         # 音频队列
         self.audio_queue = queue.Queue(maxsize=10)
@@ -120,12 +145,14 @@ class MusicPlayer:
         # 先加载文件列表（不依赖GUI）
         self.load_music_files_internal()
 
-        # 再创建GUI
-        self.create_gui()
+        # 创建GUI（嵌入式场景由外层UI接管，跳过以加快打开速度）
+        if create_gui:
+            self.create_gui()
 
     def _sync_to_shared(self):
         """同步当前状态到共享变量"""
         MusicPlayer._shared_music_volume = self.music_volume
+        MusicPlayer._shared_shuffle_mode = self.shuffle_mode
         if self.stream:
             try:
                 import sounddevice as sd
@@ -151,6 +178,7 @@ class MusicPlayer:
     def _sync_from_shared(self):
         """从共享变量恢复状态"""
         self.music_volume = MusicPlayer._shared_music_volume
+        self.shuffle_mode = MusicPlayer._shared_shuffle_mode
         self.audio_data = MusicPlayer._shared_audio_data
         self.sample_rate = MusicPlayer._shared_sample_rate
         self.channels = MusicPlayer._shared_channels
@@ -207,17 +235,17 @@ class MusicPlayer:
                 if os.path.exists(bundled_music):
                     import shutil
                     for file in os.listdir(bundled_music):
-                        if file.lower().endswith((".wav", ".mp3")):
+                        if file.lower().endswith((".wav", ".mp3", ".flac")):
                             src = os.path.join(bundled_music, file)
                             dst = os.path.join(music_path, file)
                             try:
                                 shutil.copy2(src, dst)
                             except Exception as e:
                                 print(f"复制自带歌曲失败: {e}")
-            
+
             if os.path.exists(music_path):
                 for file in os.listdir(music_path):
-                    if file.lower().endswith((".wav", ".mp3")):
+                    if file.lower().endswith((".wav", ".mp3", ".flac")):
                         self.music_files.append(os.path.join(music_path, file))
         except Exception as e:
             print(f"读取失败: {e}")
@@ -470,7 +498,7 @@ class MusicPlayer:
         )
         stop_btn.pack(side=tk.LEFT)
 
-        self.listbox.bind("<Double-Button-1>", self.on_double_click)
+        self.listbox.bind("<ButtonRelease-1>", self.on_single_click)
 
         # 更新列表显示（现在listbox已经创建）
         self.update_listbox()
@@ -564,9 +592,10 @@ class MusicPlayer:
         files = filedialog.askopenfilenames(
             title="选择音乐文件",
             filetypes=[
-                ("音频文件", "*.wav *.mp3"),
+                ("音频文件", "*.wav *.mp3 *.flac"),
                 ("WAV文件", "*.wav"),
                 ("MP3文件", "*.mp3"),
+                ("FLAC文件", "*.flac"),
                 ("所有文件", "*.*"),
             ],
         )
@@ -580,7 +609,7 @@ class MusicPlayer:
 
         imported_count = 0
         for file in files:
-            if file.lower().endswith((".wav", ".mp3")):
+            if file.lower().endswith((".wav", ".mp3", ".flac")):
                 filename = os.path.basename(file)
                 dest_path = os.path.join(music_path, filename)
 
@@ -607,8 +636,8 @@ class MusicPlayer:
         self.load_music_files_internal()
         self.update_listbox()
 
-    def on_double_click(self, event):
-        """双击播放歌曲"""
+    def on_single_click(self, event):
+        """单击播放歌曲"""
         selection = self.listbox.curselection()
         if selection:
             index = selection[0]
@@ -760,7 +789,16 @@ class MusicPlayer:
 
         # 更新索引
         if len(self.music_files) > 0:
-            if self.current_index >= len(self.music_files) - 1:
+            if self.shuffle_mode:
+                n = len(self.music_files)
+                if n > 1:
+                    idx = random.randint(0, n - 2)
+                    if idx >= self.current_index:
+                        idx += 1
+                    self.current_index = idx
+                else:
+                    self.current_index = 0
+            elif self.current_index >= len(self.music_files) - 1:
                 self.current_index = 0
             else:
                 self.current_index += 1
@@ -970,7 +1008,16 @@ class MusicPlayer:
         if len(self.music_files) == 0:
             return
 
-        if self.current_index >= len(self.music_files) - 1:
+        if self.shuffle_mode:
+            n = len(self.music_files)
+            if n > 1:
+                idx = random.randint(0, n - 2)
+                if idx >= self.current_index:
+                    idx += 1
+                self.current_index = idx
+            else:
+                self.current_index = 0
+        elif self.current_index >= len(self.music_files) - 1:
             self.current_index = 0
         else:
             self.current_index += 1

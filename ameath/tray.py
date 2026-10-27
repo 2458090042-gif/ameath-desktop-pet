@@ -61,6 +61,14 @@ def create_tray(app, version):
         """打开设置窗口"""
         show_settings_dialog(app.root, app, version)
 
+    def on_ai_chat(icon, item):
+        """打开 AI 对话"""
+        from .ai_chat import ChatWindow
+        if app.pets:
+            pet_root = app.pets[0].root
+            chat_win = ChatWindow(pet_root)
+            chat_win.show()
+
     def on_quit(icon):
         """退出（只发信号，主线程统一收尾）"""
         if hasattr(app, "request_quit"):
@@ -91,6 +99,7 @@ def create_tray(app, version):
                 on_toggle_click_through,
                 checked=lambda it: app_instance.click_through,
             ),
+            pystray.MenuItem("AI 对话", on_ai_chat),
             pystray.MenuItem("设置", on_settings),
             pystray.MenuItem("退出", on_quit),
         )

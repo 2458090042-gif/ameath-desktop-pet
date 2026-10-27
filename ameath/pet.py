@@ -1,6 +1,7 @@
 import ctypes
 from ctypes import wintypes
 import os
+import threading
 import win32gui
 import win32con
 import random
@@ -61,6 +62,7 @@ from .constants import (
     TRANSPARENCY_OPTIONS,
     WS_EX_LAYERED,
     WS_EX_TRANSPARENT,
+    WINDOW_INTRUSION_DEPTH,
 )
 from .utils import flip_frames, load_gif_frames, resource_path
 from .voice import VoicePlayer
@@ -75,6 +77,7 @@ class DesktopGif:
         self.display_priority = 1
         self._hidden_by_fullscreen = False
         self._user_hidden = False  # 用户手动隐藏标志
+        self._force_shown = False  # Alt+Ctrl 强制显示标记
 
         # 立即设置无边框，避免闪烁
         root.overrideredirect(True)
@@ -94,6 +97,8 @@ class DesktopGif:
                 self.voice_player.set_volume(voice_volume)
         except Exception:
             self.voice_player = None
+        # 延迟播放语音的定时器（用于区分单点/组合键/双击）
+        self._voice_after = None
 
         # 加载配置
         config = load_config()
@@ -217,6 +222,8 @@ class DesktopGif:
         self.paused_anim = None  # 暂停动画ID
         self._window_check_counter = 0  # 窗口检测帧计数
         self._cached_window_rect = None  # 缓存的窗口矩形
+        self._fz_cache_counter = 0  # 禁区检测帧计数
+        self._cached_forbidden_zone = None  # 缓存的窗口禁区 (fl, ft, fr, fb)
 
         self.label = tk.Label(root, bg=TRANSPARENT_COLOR, bd=0)
         self.label.pack()
@@ -235,6 +242,15 @@ class DesktopGif:
         # 加载鼠标穿透配置并设置
         config = load_config()
         self.click_through = config.get("click_through", True)
+
+        # 初始化本地台词机
+        try:
+            from .chatter import ChatterBox
+            self.chatter = ChatterBox(self)
+            self.chatter.start()
+        except Exception as e:
+            print(f"启动台词机失败: {e}")
+            self.chatter = None
         self.follow_mouse = config.get("follow_mouse", False)
         self.set_click_through(self.click_through)
 
@@ -276,25 +292,138 @@ class DesktopGif:
         # 启动退出轮询（主线程统一收尾）
         self.root.after(100, self.check_quit)
 
-        # 绑定右键事件
-        self.label.bind("<Button-3>", self.handle_right_click)
+        # 绑定双击事件（打开 AI 对话）
+        self.label.bind("<Double-Button-1>", self.handle_double_click)
 
-    def handle_right_click(self, event):
-        """处理右键点击事件 - 打开设置窗口音乐标签页"""
-        config = load_config()
-        music_enabled = config.get("music_enabled", False)
+        # 右键拖动 + 双击右键设置
+        self._right_dragging = False
+        self._right_click_time = 0  # 右键→左键组合：记录右键点击时间
+        self._left_click_time = 0  # 左键→右键组合：记录左键点击时间
+        self.label.bind("<Button-3>", self._right_start_drag)
+        self.label.bind("<B3-Motion>", self._right_do_drag)
+        self.label.bind("<ButtonRelease-3>", self._right_stop_drag)
+        self.label.bind("<Double-Button-3>", self._right_double_click)
 
-        if music_enabled:
-            # 打开设置窗口并切换到音乐标签页
-            from .settings import show_settings_dialog
-            from .utils import get_version
+        # 轮询检测 Ctrl+H
+        self._hk_triggered = False
+        self.root.after(1000, self._check_hotkey)
 
-            # 使用 manager（PetManager）而不是 app（Icon）
-            manager = getattr(self, "manager", None)
-            if manager:
-                show_settings_dialog(
-                    self.root, manager, get_version(), open_music_tab=True
-                )
+    # ---------- 全局热键 ----------
+    def _check_hotkey(self):
+        """轮询检测 Ctrl+H"""
+        if self._request_quit:
+            return
+        try:
+            ctrl = ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000
+            h_key = ctypes.windll.user32.GetAsyncKeyState(0x48) & 0x8000
+            if ctrl and h_key and not self._hk_triggered:
+                self._hk_triggered = True
+                if self._user_hidden or (self._hidden_by_fullscreen and not self._force_shown):
+                    self._hidden_by_fullscreen = False
+                    self._user_hidden = False
+                    self._force_shown = True
+                    self.root.deiconify()
+                    self.root.attributes("-topmost", True)
+                    ctypes.windll.user32.SetWindowPos(
+                        self.hwnd, HWND_TOPMOST,
+                        0, 0, 0, 0,
+                        SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW,
+                    )
+                else:
+                    self._user_hidden = True
+                    self._force_shown = False
+                    self.root.withdraw()
+                if hasattr(self, 'manager') and self.manager:
+                    self.manager._visible = self._user_hidden
+            elif not (ctrl and h_key):
+                self._hk_triggered = False
+        except Exception:
+            pass
+        self.root.after(150, self._check_hotkey)
+
+    # ---------- 左键拖动（带语音） ----------
+    # 保持现有的 start_drag / do_drag / stop_drag 不变
+
+    # ---------- 右键拖动（无声瞬发） ----------
+
+    def _right_start_drag(self, event):
+        """右键开始拖动（穿透模式下也可用）"""
+        import time as _time
+        now = _time.time()
+        self._right_click_time = now  # 记录右键时间，用于右键→左键组合
+        # 左键→右键组合：先左键再右键（1秒内）→ 暂停播放
+        if now - self._left_click_time < 1.0:
+            self._left_click_time = 0
+            self._cancel_voice_delay()  # 组合键不触发语音
+            try:
+                from ameath.music_player import MusicPlayer
+                if (
+                    MusicPlayer._instance
+                    and MusicPlayer._instance.music_files
+                    and MusicPlayer._instance.is_playing
+                ):
+                    MusicPlayer._instance.toggle_play_pause()
+            except Exception:
+                pass
+            return
+        if hasattr(self, 'manager') and self.manager:
+            self.manager._pet_active = True  # 右键点击桌宠 → 激活快捷键
+        self._right_dragging = True
+        self.dragging = True
+        self.drag_start_x = event.x
+        self.drag_start_y = event.y
+        self._pre_drag_frames = self.current_frames
+        self._pre_drag_delays = self.current_delays
+        self.current_frames = self.drag_frames
+        self.current_delays = self.drag_delays
+        self.frame_index = 0
+        self.label.config(image=self.current_frames[0])
+
+    def _right_do_drag(self, event):
+        """右键拖动中"""
+        if self._right_dragging and self.dragging:
+            self.x = event.x_root - self.drag_start_x
+            self.y = event.y_root - self.drag_start_y
+            self.root.geometry(f"+{int(self.x)}+{int(self.y)}")
+
+    def _right_stop_drag(self, event):
+        """右键停止拖动"""
+        if self._right_dragging:
+            self._right_dragging = False
+            self.dragging = False
+            if self._pre_drag_frames is not None:
+                self.current_frames = self._pre_drag_frames
+                self.current_delays = self._pre_drag_delays
+                self.frame_index = 0
+
+    def _right_double_click(self, event):
+        """双击右键 - 打开设置"""
+        if self.click_through:
+            return
+        # 如果正在拖拽，强行停止
+        if self._right_dragging or self.dragging:
+            self._right_dragging = False
+            self.dragging = False
+            if self._pre_drag_frames is not None:
+                self.current_frames = self._pre_drag_frames
+                self.current_delays = self._pre_drag_delays
+                self.frame_index = 0
+        from .settings import show_settings_dialog
+        from .utils import get_version
+        manager = getattr(self, "manager", None)
+        if manager:
+            show_settings_dialog(self.root, manager, get_version())
+
+    def handle_double_click(self, event):
+        """处理双击事件 - 打开 AI 对话"""
+        if self.click_through:
+            return
+        self._cancel_voice_delay()  # 双击不触发语音
+        try:
+            from .ai_chat import ChatWindow
+            ChatWindow(self.root).show()
+        except Exception as e:
+            print(f"打开 AI 对话失败: {e}")
 
     def ensure_visibility(self):
         """轻量级可见性轮询（替代Shell Hook）"""
@@ -329,7 +458,7 @@ class DesktopGif:
 
     def _apply_fullscreen_hide(self):
         if self._is_fullscreen_window_active():
-            if not self._hidden_by_fullscreen:
+            if not self._hidden_by_fullscreen and not self._force_shown:
                 self.root.withdraw()
                 self._hidden_by_fullscreen = True
             return
@@ -337,6 +466,9 @@ class DesktopGif:
             self.root.deiconify()
             self._hidden_by_fullscreen = False
         self._apply_topmost()
+        # 全屏窗口关闭后取消强制显示标记
+        if self._force_shown:
+            self._force_shown = False
 
     def _apply_desktop_only(self):
         if self._hidden_by_fullscreen:
@@ -399,21 +531,10 @@ class DesktopGif:
         self.root.after(100, self.check_quit)
 
     def set_click_through(self, enable):
-        """设置鼠标穿透"""
-        try:
-            # 动态获取窗口句柄
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if enable:
-                ctypes.windll.user32.SetWindowLongW(
-                    hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT
-                )
-            else:
-                ctypes.windll.user32.SetWindowLongW(
-                    hwnd, GWL_EXSTYLE, style & ~WS_EX_TRANSPARENT
-                )
-        except Exception as e:
-            print(f"设置鼠标穿透失败: {e}")
+        """设置鼠标穿透（不阻塞右键拖拽）"""
+        self.click_through = enable
+        # 不再使用 WS_EX_TRANSPARENT，只在代码层忽略左键事件
+        # 宠物粉色背景天然就是穿透的，右键拖拽不受影响
 
     def set_transparency(self, index):
         """设置透明度"""
@@ -549,6 +670,34 @@ class DesktopGif:
         """开始拖动（鼠标穿透关闭时才可用）"""
         if self.click_through:
             return
+        import time as _time
+        now = _time.time()
+        self._left_click_time = now  # 记录左键时间，用于左键→右键组合
+        # 右键→左键组合：先右键再左键（1秒内）→ 直接开始播放
+        if now - self._right_click_time < 1.0:
+            self._right_click_time = 0
+            try:
+                from ameath.music_player import MusicPlayer
+                if MusicPlayer._instance and MusicPlayer._instance.music_files:
+                    if MusicPlayer._instance.is_paused:
+                        # 暂停后双键唤醒：从暂停位置继续播放
+                        MusicPlayer._instance.toggle_play_pause()
+                    else:
+                        # 从未选过歌（current_index 无效）→ 随机选一首播放
+                        if (
+                            MusicPlayer._instance.current_index < 0
+                            or MusicPlayer._instance.current_index
+                            >= len(MusicPlayer._instance.music_files)
+                        ):
+                            import random
+
+                            MusicPlayer._instance.current_index = random.randint(
+                                0, len(MusicPlayer._instance.music_files) - 1
+                            )
+                        MusicPlayer._instance.play_current_track()
+            except Exception:
+                pass
+            return
         self.dragging = True
         # 记录鼠标相对于窗口左上角的偏移量
         self.drag_start_x = event.x
@@ -562,9 +711,25 @@ class DesktopGif:
         self.frame_index = 0
         self.label.config(image=self.current_frames[0])
 
-        # 播放随机语音（如果启用）
+        # 延迟播放语音：稍等片刻确认是单点（而非组合键/双击）后再播
+        self._cancel_voice_delay()
+        if self.voice_player:
+            self._voice_after = self.root.after(300, self._play_voice_if_single)
+
+    def _play_voice_if_single(self):
+        """延迟定时器触发：确认没有组合键/双击打断后播放语音"""
+        self._voice_after = None
         if self.voice_player:
             self.voice_player.play_random_voice()
+
+    def _cancel_voice_delay(self):
+        """取消待播放的语音（组合键/双击时调用）"""
+        if self._voice_after is not None:
+            try:
+                self.root.after_cancel(self._voice_after)
+            except Exception:
+                pass
+            self._voice_after = None
 
     def do_drag(self, event):
         """拖动中"""
@@ -714,6 +879,36 @@ class DesktopGif:
                 except Exception:
                     return None
         return None
+
+    def _get_window_forbidden_zone(self):
+        """获取前台全屏窗口的"禁止深入区域"（窗口内缩一个身位）。
+        只有前台窗口是全屏时才限制桌宠活动，避免覆盖全屏内容。
+        普通窗口不限制，保证桌宠自由飞行。
+        返回 (left, top, right, bottom) 或 None（无需限制）。
+        """
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return None
+        # 只在当前台窗口是全屏窗口时才限制
+        if not self._is_fullscreen_window_active():
+            return None
+        # 排除桌面本身
+        class_name = win32gui.GetClassName(hwnd)
+        if class_name in ("Progman", "WorkerW"):
+            return None
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            return None
+        wl, wt, wr, wb = rect
+        ww = wr - wl
+        wh = wb - wt
+        # 窗口太小则不限制
+        if ww <= self.w * 2 or wh <= self.h * 2:
+            return None
+        margin_x = int(self.w * WINDOW_INTRUSION_DEPTH)
+        margin_y = int(self.h * WINDOW_INTRUSION_DEPTH)
+        return (wl + margin_x, wt + margin_y, wr - margin_x, wb - margin_y)
 
     # ============ 运动系统方法 ============
 
@@ -990,6 +1185,71 @@ class DesktopGif:
         # 应用移动
         self.x += self.vx
         self.y += self.vy
+
+        # ============ 窗口禁区检测（每6帧约180ms检测一次）============
+        self._fz_cache_counter += 1
+        if self._fz_cache_counter >= 6:
+            self._fz_cache_counter = 0
+            self._cached_forbidden_zone = self._get_window_forbidden_zone()
+
+        fz = self._cached_forbidden_zone
+        if fz is not None:
+            fl, ft, fr, fb = fz
+            pet_right = self.x + self.w
+            pet_bottom = self.y + self.h
+            pet_cx = self.x + self.w / 2
+            pet_cy = self.y + self.h / 2
+            pushed = False
+
+            # 从左边闯入禁区
+            if pet_right > fl and self.x < fl:
+                self.x = fl - self.w
+                self.vx = -abs(self.vx)
+                pushed = True
+            # 从右边闯入禁区
+            elif self.x < fr and pet_right > fr:
+                self.x = fr
+                self.vx = abs(self.vx)
+                pushed = True
+            # 完全在禁区内部（兜底），按中心点最近边推出
+            elif fl <= pet_cx <= fr and ft <= pet_cy <= fb:
+                dist_left = pet_cx - fl
+                dist_right = fr - pet_cx
+                dist_top = pet_cy - ft
+                dist_bottom = fb - pet_cy
+                min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+                if min_dist == dist_left:
+                    self.x = fl - self.w
+                    self.vx = -abs(self.vx)
+                elif min_dist == dist_right:
+                    self.x = fr
+                    self.vx = abs(self.vx)
+                elif min_dist == dist_top:
+                    self.y = ft - self.h
+                    self.vy = -abs(self.vy)
+                else:
+                    self.y = fb
+                    self.vy = abs(self.vy)
+                pushed = True
+
+            # 从上方/下方闯入禁区
+            if not pushed:
+                if pet_bottom > ft and self.y < ft:
+                    self.y = ft - self.h
+                    self.vy = -abs(self.vy)
+                    pushed = True
+                elif self.y < fb and pet_bottom > fb:
+                    self.y = fb
+                    self.vy = abs(self.vy)
+                    pushed = True
+
+            # 碰壁后换目标，自然调头飞走
+            if pushed:
+                self.target_x, self.target_y = self.get_random_target()
+
+            # 碰壁后换个目标，往别处飞
+            if pushed:
+                self.target_x, self.target_y = self.get_random_target()
 
         # ============ 边缘处理 ============
         if not self.handle_edge():

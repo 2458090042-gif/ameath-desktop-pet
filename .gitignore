@@ -1,15 +1,36 @@
-# Python-generated files
+# ---- Python ----
 __pycache__/
-*.py[oc]
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
 build/
 dist/
 wheels/
-*.egg-info
+*.spec.bak
 
-# Virtual environments
-.venv
-
+# ---- 本地配置（AI Key 就存在这里，绝对不能上传）----
 config.json
 git_hash.txt
 
+# ---- 媒体资源：体积过大且含第三方版权素材，一律不入库 ----
+# 需要运行请自行放入 sound/ 目录，见 README「资源说明」
+sound/music/*
+!sound/music/.gitkeep
+sound/voice/*
+!sound/voice/.gitkeep
+
+# ---- 字体 ----
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.lnk
 nul
+Thumbs.db
+.DS_Store
+*.bak
+*.bak_*
